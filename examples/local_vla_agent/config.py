@@ -11,7 +11,7 @@ logger = logging.getLogger("vla")
 
 
 # -------------------- Config --------------------
-SDK_URL = os.getenv("SDK_URL", "http://localhost:8000").rstrip("/")
+SDK_URL = os.getenv("SDK_URL", "http://127.0.0.1:8000").rstrip("/")
 
 CONTROL_ENDPOINT = f"{SDK_URL}/control"
 DATA_ENDPOINT = f"{SDK_URL}/data"

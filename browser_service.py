@@ -22,37 +22,66 @@ class BrowserService:
         self.browser = None
         self.page = None
         self.default_viewport = {"width": 3840, "height": 2160}
+        self._basic_init_done = False
+        self._video_init_done = False
+
+    async def initialize_browser_basic(self):
+        if self._basic_init_done:
+            return
+        
+        try:
+            executable_path = os.getenv(
+                "CHROME_EXECUTABLE_PATH",
+                "/Applications/Google Chrome.app/Contents/MacOS/Google Chrome",
+            )
+            self.browser = await launch(
+                executablePath=executable_path,
+                headless=True,
+                args=[
+                    "--ignore-certificate-errors",
+                    "--no-sandbox",
+                    f"--window-size={self.default_viewport['width']},{self.default_viewport['height']}",
+                ],
+            )
+            self.page = await self.browser.newPage()
+            await self.page.setViewport(self.default_viewport)
+            await self.page.setExtraHTTPHeaders(
+                {"Accept-Language": "en-US,en;q=0.9"}
+            )
+            await self.page.goto(
+                "http://127.0.0.1:8000/sdk", {"waitUntil": "networkidle2"}
+            )
+            await self.page.click("#join")
+            
+            # Wait for RTM connection (map element indicates RTM is working)
+            await self.page.waitForSelector("#map", {"timeout": 15000})
+            
+            # Give RTM a moment to receive initial data
+            await self.page.waitFor(2000)
+            
+            self._basic_init_done = True
+            print("Browser basic init complete (RTM connected)")
+        except Exception as e:
+            print(f"Error in basic browser init: {e}")
+            if self.browser:
+                await self.browser.close()
+                self.browser = None
+                self.page = None
+            self._basic_init_done = False
+            raise
 
     async def initialize_browser(self):
-        if not self.browser:
+        """Full initialization including video stream - needed for frames/screenshots."""
+        # First do basic init if not done
+        if not self._basic_init_done:
+            await self.initialize_browser_basic()
+        
+        # Then wait for video if not done
+        if not self._video_init_done:
             try:
-                executable_path = os.getenv(
-                    "CHROME_EXECUTABLE_PATH",
-                    "/Applications/Google Chrome.app/Contents/MacOS/Google Chrome",
-                )
-                self.browser = await launch(
-                    executablePath=executable_path,
-                    headless=True,
-                    args=[
-                        "--ignore-certificate-errors",
-                        "--no-sandbox",
-                        f"--window-size={self.default_viewport['width']},{self.default_viewport['height']}",
-                    ],
-                )
-                self.page = await self.browser.newPage()
+                print("Waiting for video stream...")
+                await self.page.waitForSelector("video", {"timeout": 30000})
                 await self.page.setViewport(self.default_viewport)
-                await self.page.setExtraHTTPHeaders(
-                    {"Accept-Language": "en-US,en;q=0.9"}
-                )
-                await self.page.goto(
-                    "http://127.0.0.1:8000/sdk", {"waitUntil": "networkidle2"}
-                )
-                await self.page.click("#join")
-                await self.page.waitForSelector("video")
-                await self.page.waitForSelector("#map")
-                await self.page.setViewport(self.default_viewport)
-
-                await self.page.waitFor(2000)
 
                 call = f"""() => {{
                     window.initializeImageParams({{
@@ -61,11 +90,11 @@ class BrowserService:
                     }});
                 }}"""
                 await self.page.evaluate(call)
+                
+                self._video_init_done = True
+                print("Browser full init complete (video connected)")
             except Exception as e:
-                print(f"Error initializing browser: {e}")
-                self.browser = None
-                self.page = None
-                await self.close_browser()
+                print(f"Error waiting for video: {e}")
                 raise
 
     async def take_screenshot(self, video_output_folder: str, elements: list):
@@ -111,7 +140,7 @@ class BrowserService:
         return screenshots
 
     async def data(self) -> dict:
-        await self.initialize_browser()
+        await self.initialize_browser_basic()
 
         bot_data = await self.page.evaluate(
             """() => {

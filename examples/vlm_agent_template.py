@@ -24,7 +24,6 @@ async def get_bot_state(session):
             data = await resp.json()
         
         # Get Vision
-        # You can also use /v2/front or /v2/rear if you only need one camera
         async with session.get(VISION_ENDPOINT) as resp:
             vision = await resp.json()
             

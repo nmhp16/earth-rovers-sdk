@@ -99,10 +99,15 @@ async def main():
             else:
                 cap_rear = "no rear frame"
 
-            logger.info(f"👀 Front: '{cap_front}' | Rear: '{cap_rear}'")
+            logger.info(f"Front: '{cap_front}' | Rear: '{cap_rear}'")
 
-            # LLM decision (heavy) in background thread
-            raw = await asyncio.to_thread(brain.decide, telemetry, cap_front, cap_rear)
+            # If we are blind, do not ask the brain, just STOP.
+            if "no front frame" in cap_front and "no rear frame" in cap_rear:
+                logger.warning("Blind (no frames) -> Forcing STOP")
+                raw = '{"linear": 0.0, "angular": 0.0, "lamp": 0}'
+            else:
+                # LLM decision (heavy) in background thread
+                raw = await asyncio.to_thread(brain.decide, telemetry, cap_front, cap_rear)
 
             # parse JSON robustly
             action_obj: Optional[Dict[str, Any]] = None
