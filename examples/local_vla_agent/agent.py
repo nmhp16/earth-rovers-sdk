@@ -1,17 +1,3 @@
-#!/usr/bin/env python3
-"""
-Frodobots Earth Rovers SDK v4.9 - Local VLA Agent (Safer + Async)
-
-Endpoints used:
-- GET  /data
-- GET  /v2/screenshot   (front+rear+timestamp)
-- POST /control
-Optional (if enabled):
-- POST /start-mission
-- POST /interventions/start
-- POST /interventions/end
-"""
-
 import asyncio
 import json
 import logging
@@ -20,9 +6,6 @@ from typing import Optional, Dict, Any
 
 import aiohttp
 
-# Import local modules
-# Note: Ensure you run this script from the directory containing it,
-# or set PYTHONPATH such that these modules are resolvable.
 try:
     from config import (
         logger, DATA_ENDPOINT, V2_SCREENSHOT_ENDPOINT, CONTROL_ENDPOINT,
@@ -37,11 +20,7 @@ try:
     from brain import BrainSystem
     from network import http_get_json, http_post_json, send_stop, start_mission_if_enabled, intervention_start
 except ImportError:
-    # If run as a package (e.g. from root via python -m examples.local_vla_agent.agent)
-    # WARNING: This fallback relies on implicit relative imports or package structure which might not work if submodules use absolute imports
-    # However, since I removed dots from submodules, they will only work if the folder is in sys.path.
-    # The 'try' block typically covers the 'run from folder' case.
-    # The 'except' block handles checking if we are in a package.
+    # Fallback to package-relative imports when executed as a module
     from .config import (
         logger, DATA_ENDPOINT, V2_SCREENSHOT_ENDPOINT, CONTROL_ENDPOINT,
         HTTP_TIMEOUT_S, LOOP_DT, STALE_S,

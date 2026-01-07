@@ -45,6 +45,11 @@ BLIP_MAX_NEW_TOKENS = int(os.getenv("BLIP_MAX_NEW_TOKENS", "24"))
 
 # LLM model
 MODEL_PATH = os.getenv("MODEL_PATH", "./models/stablelm-zephyr-3b.Q4_K_M.gguf")
+MODEL_DOWNLOAD_URL = os.getenv(
+    "MODEL_DOWNLOAD_URL",
+    "https://huggingface.co/TheBloke/stablelm-zephyr-3b-GGUF/resolve/main/stablelm-zephyr-3b.Q4_K_M.gguf",
+)
+
 LLM_CTX = int(os.getenv("LLM_CTX", "2048"))
 LLM_MAX_TOKENS = int(os.getenv("LLM_MAX_TOKENS", "140"))
 LLM_TEMP = float(os.getenv("LLM_TEMP", "0.2"))

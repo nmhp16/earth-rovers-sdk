@@ -1,15 +1,31 @@
 import os
 from typing import Dict, Any
 from llama_cpp import Llama
-from config import logger, MODEL_PATH, LLM_CTX, LLM_GPU_LAYERS, LLM_MAX_TOKENS, LLM_TEMP, SYSTEM_PROMPT
+from config import (
+    logger,
+    MODEL_PATH,
+    MODEL_DOWNLOAD_URL,
+    LLM_CTX,
+    LLM_GPU_LAYERS,
+    LLM_MAX_TOKENS,
+    LLM_TEMP,
+    SYSTEM_PROMPT,
+)
+
+from utils import download_file
+
 
 class BrainSystem:
     def __init__(self):
         if not os.path.exists(MODEL_PATH):
-            raise FileNotFoundError(
-                f"GGUF model not found at {MODEL_PATH}\n"
-                f"Set MODEL_PATH or download the file."
-            )
+            logger.info(f"GGUF model not found at {MODEL_PATH}. Attempting download from {MODEL_DOWNLOAD_URL}...")
+            try:
+                download_file(MODEL_DOWNLOAD_URL, MODEL_PATH)
+            except Exception as e:
+                raise FileNotFoundError(
+                    f"Failed to download GGUF model from {MODEL_DOWNLOAD_URL} -> {e}"
+                )
+
         logger.info(f"Loading LLM from {MODEL_PATH} ...")
         try:
             self.llm = Llama(
