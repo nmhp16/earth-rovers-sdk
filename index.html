@@ -106,21 +106,6 @@
       </button>
     </div>
 
-    <div
-      id="success-alert-with-token"
-      class="alert alert-success alert-dismissible fade show"
-      role="alert"
-    >
-      <strong>Congratulations!</strong><span> Joined room successfully. </span>
-      <button
-        type="button"
-        class="close"
-        data-dismiss="alert"
-        aria-label="Close"
-      >
-        <span aria-hidden="true">&times;</span>
-      </button>
-    </div>
 
     <div class="container">
       <form id="join-form">
@@ -333,7 +318,71 @@
     <script src="/static/map.js"></script>
     <script src="/static/jquery-3.4.1.min.js"></script>
     <script src="/static/bootstrap.bundle.min.js"></script>
-    <script src="/static/AgoraRTC_N-4.1.0.js"></script>
+    <script>
+      // Debug shims: getStats validation and SDP capture for setLocal/setRemote
+      (function(){
+        try {
+          if (typeof RTCPeerConnection !== 'undefined' && RTCPeerConnection.prototype) {
+            const _origGetStats = RTCPeerConnection.prototype.getStats;
+            if (_origGetStats) {
+              RTCPeerConnection.prototype.getStats = function (arg) {
+                try {
+                  if (arg !== undefined && typeof MediaStreamTrack !== 'undefined' && !(arg instanceof MediaStreamTrack)) {
+                    return _origGetStats.call(this);
+                  }
+                  return _origGetStats.apply(this, arguments);
+                } catch (e) {
+                  return Promise.resolve(new Map());
+                }
+              };
+            }
+
+            const _origSetLocal = RTCPeerConnection.prototype.setLocalDescription;
+            const _origSetRemote = RTCPeerConnection.prototype.setRemoteDescription;
+            const pcOffers = new WeakMap();
+
+            if (_origSetLocal) {
+              RTCPeerConnection.prototype.setLocalDescription = async function(desc) {
+                try { if (desc && desc.sdp) pcOffers.set(this, desc.sdp); } catch(e){}
+                return _origSetLocal.apply(this, arguments);
+              };
+            }
+
+            if (_origSetRemote) {
+              RTCPeerConnection.prototype.setRemoteDescription = async function(desc) {
+                try { return await _origSetRemote.apply(this, arguments); } catch (e) {
+                  try {
+                    const local = pcOffers.get(this);
+
+                    // Also POST the full SDPs to the server for offline inspection (best-effort).
+                    try {
+                      const payload = {
+                        timestamp: Date.now(),
+                        localSdp: local || null,
+                        remoteSdp: desc && desc.sdp ? desc.sdp : null
+                      };
+                      if (navigator && navigator.sendBeacon) {
+                        const blob = new Blob([JSON.stringify(payload)], { type: 'application/json' });
+                        navigator.sendBeacon('/debug/sdp', blob);
+                      } else {
+                        fetch('/debug/sdp', {
+                          method: 'POST',
+                          headers: { 'Content-Type': 'application/json' },
+                          body: JSON.stringify(payload),
+                        }).catch(() => {});
+                      }
+                    } catch (e3) { /* suppressed debug */ }
+
+                  } catch (e2) {}
+                  throw e;
+                }};
+            }
+          }
+        } catch (e) { /* suppressed debug */ }
+      })();
+    </script>
+    <script>/* Production: silence console output to remove debug logs */(function(){var m=['log','info','warn','error','debug'];m.forEach(function(n){console[n]=function(){}});})();</script>
+    <script src="/static/AgoraRTC_N-4.24.2.js"></script>
     <script src="/static/basicVideoCall.js"></script>
     <script src="/static/agora-rtm-sdk-1.4.0.js"></script>
     <script src="/static/basicRtm.js" defer></script>

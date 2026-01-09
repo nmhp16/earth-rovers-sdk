@@ -60,9 +60,7 @@ class BrowserService:
             await self.page.waitFor(2000)
             
             self._basic_init_done = True
-            print("Browser basic init complete (RTM connected)")
         except Exception as e:
-            print(f"Error in basic browser init: {e}")
             if self.browser:
                 await self.browser.close()
                 self.browser = None
@@ -76,11 +74,10 @@ class BrowserService:
         if not self._basic_init_done:
             await self.initialize_browser_basic()
         
-        # Then wait for video if not done
         if not self._video_init_done:
             try:
-                print("Waiting for video stream...")
-                await self.page.waitForSelector("video", {"timeout": 30000})
+                selector = "#remote-playerlist .player, [id^=\"player-\"]"
+                await self.page.waitForSelector(selector, {"timeout": 30000})
                 await self.page.setViewport(self.default_viewport)
 
                 call = f"""() => {{
@@ -90,15 +87,15 @@ class BrowserService:
                     }});
                 }}"""
                 await self.page.evaluate(call)
-                
                 self._video_init_done = True
-                print("Browser full init complete (video connected)")
             except Exception as e:
-                print(f"Error waiting for video: {e}")
-                raise
+                # Timeout or other error waiting for players; log and continue
+                logger.exception("Player container wait timed out or failed: %s", e)
+                # Keep _video_init_done False so we can retry later, but don't raise
+                return
 
     async def take_screenshot(self, video_output_folder: str, elements: list):
-        await self.initialize_browser()
+        await self.initialize_browser_basic()
 
         dimensions = await self.page.evaluate(
             """() => {
@@ -130,12 +127,7 @@ class BrowserService:
                     elapsed_time = (
                         end_time - start_time
                     ) * 1000  # Convert to milliseconds
-                    print(f"Screenshot for {name} took {elapsed_time:.2f} ms")
                     screenshots[name] = output_path
-                else:
-                    print(f"Element {element_id} not found")
-            else:
-                print(f"Invalid element name: {name}")
 
         return screenshots
 
@@ -151,23 +143,39 @@ class BrowserService:
         return bot_data
 
     async def front(self) -> str:
-        await self.initialize_browser()
+        # Use RTM/basic init so front frame attempts don't block when video is absent
+        await self.initialize_browser_basic()
 
+        # Wait a moment for video to buffer and become ready
         front_frame = await self.page.evaluate(
-            """() => {
-        return getLastBase64Frame(1000) || null;
-        }"""
+            """async () => {
+                // Try up to 10 times with 200ms intervals (2 seconds total)
+                for (let i = 0; i < 10; i++) {
+                    const result = await getLastBase64Frame(1000);
+                    if (result) return result;
+                    await new Promise(r => setTimeout(r, 200));
+                }
+                return null;
+            }"""
         )
 
         return front_frame
 
     async def rear(self) -> str:
-        await self.initialize_browser()
+        # Use RTM/basic init so rear frame attempts don't block when video is absent
+        await self.initialize_browser_basic()
 
+        # Wait a moment for video to buffer and become ready
         rear_frame = await self.page.evaluate(
-            """() => {
-        return getLastBase64Frame(1001) || null;
-        }"""
+            """async () => {
+                // Try up to 10 times with 200ms intervals (2 seconds total)
+                for (let i = 0; i < 10; i++) {
+                    const result = await getLastBase64Frame(1001);
+                    if (result) return result;
+                    await new Promise(r => setTimeout(r, 200));
+                }
+                return null;
+            }"""
         )
 
         return rear_frame
@@ -181,6 +189,26 @@ class BrowserService:
             }""",
             message,
         )
+
+    async def get_players(self):
+        """Return detected player UIDs and a short HTML snapshot of the remote-playerlist."""
+        await self.initialize_browser_basic()
+        try:
+            uids = await self.page.evaluate(
+                """() => {
+                const els = Array.from(document.querySelectorAll('[id^="player-"]'));
+                return els.map(e => parseInt(e.id.replace('player-',''))).filter(n => !isNaN(n));
+                }"""
+            )
+            snapshot = await self.page.evaluate(
+                """() => {
+                const node = document.getElementById('remote-playerlist');
+                return node ? node.innerHTML.slice(0, 2000) : '';
+                }"""
+            )
+            return {"uids": uids, "snapshot": snapshot}
+        except Exception as e:
+            return {"uids": [], "snapshot": ""}
 
     async def close_browser(self):
         if self.browser:

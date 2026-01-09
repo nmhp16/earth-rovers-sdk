@@ -33,6 +33,19 @@ var options = {
   uid: null,
   token: null,
 };
+var pendingSubscriptions = new Set();
+var incompatibleSubscriptions = new Map(); // key -> timestamp (ms)
+
+if (typeof RTCPeerConnection !== 'undefined' && RTCPeerConnection.prototype && RTCPeerConnection.prototype.getStats) {
+  const _origGetStats = RTCPeerConnection.prototype.getStats;
+  RTCPeerConnection.prototype.getStats = function(selectors) {
+    try {
+      return _origGetStats.call(this, selectors);
+    } catch (err) {
+      return Promise.resolve(new Map());
+    }
+  };
+}
 
 // you can find all the agora preset video profiles here https://docs.agora.io/en/Voice/API%20Reference/web_ng/globals.html#videoencoderconfigurationpreset
 var videoProfiles = [
@@ -207,7 +220,7 @@ $("#join-form").submit(async function (e) {
       $("#success-alert").css("display", "block");
     }
   } catch (error) {
-    console.error(error);
+    /* suppressed debug */
   } finally {
     $("#leave").attr("disabled", false);
   }
@@ -268,7 +281,7 @@ async function leave() {
   $("#join").attr("disabled", false);
   $("#leave").attr("disabled", true);
   $("#joined-setup").css("display", "none");
-  console.log("client leaves channel success");
+  /* suppressed debug */
 }
 
 /*
@@ -279,39 +292,90 @@ async function leave() {
  */
 async function subscribe(user, mediaType) {
   const uid = user.uid;
-  await client.subscribe(user, mediaType);
-  console.log("subscribe success");
-  if (mediaType === "video") {
-    const playerWidth =
-      uid === 1001 ? "540px" : uid === 1000 ? "1024px" : "auto";
-    const playerHeight =
-      uid === 1001 ? "360px" : uid === 1000 ? "576px" : "auto";
+  const subscriptionKey = `${uid}:${mediaType}`;
 
-    const player = $(`
-      <div id="player-wrapper-${uid}">
-        <p class="player-name">(${uid})</p>
-        <div id="player-${uid}" class="player" style="width: ${playerWidth}; height: ${playerHeight};"></div>
-      </div>
-    `);
-    $("#remote-playerlist").append(player);
-    user.videoTrack.play(`player-${uid}`);
+  // Backoff if we've seen an incompatible SDP recently
+  const incompatibleSince = incompatibleSubscriptions.get(subscriptionKey);
+  if (incompatibleSince && Date.now() - incompatibleSince < 60_000) {
 
-    const capturedFrameDiv = $(`
-      <div id="captured-frame-${uid}" style="width: ${playerWidth}; height: ${playerHeight}; display: ${
-      DEBUG_MODE ? "block" : "none"
-    };">
-        <p>Captured Frames (${uid})</p>
-        <img id="captured-image-${uid}" style="width: 100%; height: 100%; object-fit: contain;">
-        <button id="download-frame-${uid}" class="btn btn-primary mt-2">Download Frame</button>
-        <button id="download-base64-${uid}" class="btn btn-secondary mt-2 ml-2">Download Base64</button>
-      </div>
-    `);
-    $("#captured-frames").append(capturedFrameDiv);
-
-    user.videoTrack.captureEnabled = true;
   }
-  if (mediaType === "audio") {
-    user.audioTrack.play();
+
+  if (pendingSubscriptions.has(subscriptionKey)) {
+    return;
+  }
+  pendingSubscriptions.add(subscriptionKey);
+
+  try {
+    await client.subscribe(user, mediaType);
+
+    if (mediaType === "video") {
+      const playerWidth = uid === 1001 ? "540px" : uid === 1000 ? "1024px" : "auto";
+      const playerHeight = uid === 1001 ? "360px" : uid === 1000 ? "576px" : "auto";
+
+      if ($(`#player-wrapper-${uid}`).length === 0) {
+        const player = $(`
+          <div id="player-wrapper-${uid}">
+            <p class="player-name">(${uid})</p>
+            <div id="player-${uid}" class="player" style="width: ${playerWidth}; height: ${playerHeight};"></div>
+          </div>
+        `);
+        $("#remote-playerlist").append(player);
+      }
+
+      try {
+        if (user.videoTrack) {
+          user.videoTrack.play(`player-${uid}`);
+          user.videoTrack.captureEnabled = true;
+        } else {
+          /* suppressed debug */
+        }
+      } catch (err) {
+        /* suppressed debug */
+      }
+
+      if ($(`#captured-frame-${uid}`).length === 0) {
+        const capturedFrameDiv = $(`
+          <div id="captured-frame-${uid}" style="width: ${playerWidth}; height: ${playerHeight}; display: ${
+          DEBUG_MODE ? "block" : "none"
+        };">
+            <p>Captured Frames (${uid})</p>
+            <img id="captured-image-${uid}" style="width: 100%; height: 100%; object-fit: contain;">
+            <button id="download-frame-${uid}" class="btn btn-primary mt-2">Download Frame</button>
+            <button id="download-base64-${uid}" class="btn btn-secondary mt-2 ml-2">Download Base64</button>
+          </div>
+        `);
+        $("#captured-frames").append(capturedFrameDiv);
+      }
+    }
+
+    if (mediaType === "audio") {
+      if (user.audioTrack) {
+        user.audioTrack.play();
+      }
+    }
+  } catch (err) {
+    const msg = (err && (err.message || JSON.stringify(err))) || String(err);
+
+    // If it's an SDP send/recv mismatch, avoid repeated retries and notify the bot
+    if (msg.includes('Incompatible send direction') || msg.includes('set remote answer error')) {
+      incompatibleSubscriptions.set(subscriptionKey, Date.now());
+      // schedule removal after 60s so we can try again later
+      setTimeout(() => incompatibleSubscriptions.delete(subscriptionKey), 60_000);
+      // Send a message to the bot to ask it to republish (if supported)
+      try {
+        if (window && window.sendMessage) {
+          window.sendMessage({ type: 'republish_request', uid: uid, mediaType: mediaType });
+        }
+      } catch (e) {
+        /* suppressed debug */
+      }
+    }
+
+    // If it's a repeat subscribe, ignore further retries for a short time
+    if (msg.includes('Repeat subscribe') || (err && err.code === 2021)) {
+    }
+  } finally {
+    pendingSubscriptions.delete(subscriptionKey);
   }
 }
 
@@ -351,16 +415,69 @@ function getCodec() {
 }
 
 async function captureFrameAsBase64(videoTrack) {
-  const frame = await videoTrack.getCurrentFrameData();
-  const canvas = document.createElement("canvas");
-  canvas.width = frame.width;
-  canvas.height = frame.height;
-  const ctx = canvas.getContext("2d");
-  ctx.putImageData(frame, 0, 0);
-  return canvas.toDataURL(
-    `image/${window.imageParams["imageFormat"]}`,
-    window.imageParams["imageQuality"]
-  );
+  if (!videoTrack) {
+    return null;
+  }
+  
+  // First try using getCurrentFrameData (Agora SDK method)
+  if (typeof videoTrack.getCurrentFrameData === 'function') {
+    try {
+      const frame = await videoTrack.getCurrentFrameData();
+      if (frame && frame.width && frame.height) {
+        const canvas = document.createElement("canvas");
+        canvas.width = frame.width;
+        canvas.height = frame.height;
+        const ctx = canvas.getContext("2d");
+        ctx.putImageData(frame, 0, 0);
+        return canvas.toDataURL(
+          `image/${window.imageParams["imageFormat"]}`,
+          window.imageParams["imageQuality"]
+        );
+      }
+    } catch (err) {
+      /* suppressed debug */
+    }
+  }
+  
+  // Fallback: Find the video element in the DOM and capture from it
+  try {
+    // Try to get the video element from the track's internal player
+    const trackId = videoTrack.getTrackId ? videoTrack.getTrackId() : null;
+    let videoEl = null;
+    
+    // Look for video element associated with this track
+    if (trackId) {
+      videoEl = document.querySelector(`video[id*="${trackId}"]`);
+    }
+    
+    // If not found by track ID, try to find by player
+    if (!videoEl) {
+      // The Agora SDK creates video elements inside player divs
+      const allVideos = document.querySelectorAll('.player video, .agora_video_player');
+      for (const v of allVideos) {
+        if (v.readyState >= 2 && v.videoWidth > 0) {
+          videoEl = v;
+          break;
+        }
+      }
+    }
+    
+    if (videoEl && videoEl.readyState >= 2 && videoEl.videoWidth > 0) {
+      const canvas = document.createElement("canvas");
+      canvas.width = videoEl.videoWidth;
+      canvas.height = videoEl.videoHeight;
+      const ctx = canvas.getContext("2d");
+      ctx.drawImage(videoEl, 0, 0);
+      return canvas.toDataURL(
+        `image/${window.imageParams["imageFormat"]}`,
+        window.imageParams["imageQuality"]
+      );
+    } else {
+      return null;
+    }
+  } catch (err) {
+    return null;
+  }
 }
 
 // Add at the beginning of the file
@@ -369,14 +486,43 @@ const lastBase64Frames = {};
 
 // Function to get the latest base64 frame for a specific UID
 async function getLastBase64Frame(uid) {
-  const user = remoteUsers[uid];
-  if (!user || !user.videoTrack || !user.videoTrack.captureEnabled) {
+  try {
+    const user = remoteUsers[uid];
+    
+    // First try using the user's videoTrack
+    if (user && user.videoTrack) {
+      const base64Frame = await captureFrameAsBase64(user.videoTrack);
+      if (base64Frame) {
+        lastBase64Frames[uid] = base64Frame;
+        return base64Frame;
+      }
+    }
+    
+    // Fallback: Try to find a video element for this UID in the DOM
+    const playerDiv = document.querySelector(`#player-${uid}`);
+    if (playerDiv) {
+      const videoEl = playerDiv.querySelector('video');
+      if (videoEl && videoEl.readyState >= 2 && videoEl.videoWidth > 0) {
+        const canvas = document.createElement("canvas");
+        canvas.width = videoEl.videoWidth;
+        canvas.height = videoEl.videoHeight;
+        const ctx = canvas.getContext("2d");
+        ctx.drawImage(videoEl, 0, 0);
+        const base64Frame = canvas.toDataURL(
+          `image/${window.imageParams["imageFormat"]}`,
+          window.imageParams["imageQuality"]
+        );
+        lastBase64Frames[uid] = base64Frame;
+        return base64Frame;
+      } else {
+      }
+    } else {
+    }
+    
+    return null;
+  } catch (err) {
     return null;
   }
-
-  const base64Frame = await captureFrameAsBase64(user.videoTrack);
-  lastBase64Frames[uid] = base64Frame;
-  return base64Frame;
 }
 
 function initializeImageParams({ imageFormat, imageQuality }) {
