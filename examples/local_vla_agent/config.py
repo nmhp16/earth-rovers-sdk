@@ -28,7 +28,8 @@ INTERVENTION_START_ENDPOINT = f"{SDK_URL}/interventions/start"
 INTERVENTION_END_ENDPOINT = f"{SDK_URL}/interventions/end"
 
 # HTTP request timeout in seconds
-HTTP_TIMEOUT_S = float(os.getenv("HTTP_TIMEOUT_S", "2.0"))
+# Increase default timeout to handle slower networks / page fetches
+HTTP_TIMEOUT_S = float(os.getenv("HTTP_TIMEOUT_S", "5.0"))
 
 
 # ==============================================================================
@@ -138,6 +139,18 @@ STALE_RETRY_DELAY = float(os.getenv("STALE_RETRY_DELAY", "0.25"))
 
 # Maximum backoff sleep when stale data persists
 STALE_BACKOFF_MAX_SLEEP = float(os.getenv("STALE_BACKOFF_MAX_SLEEP", "3.0"))
+
+
+# ==============================================================================
+# STUCK / ROTATION TUNING
+# ======================================================================
+# Target degrees for rotation completion checks (fallback to ticks if not reached)
+ROTATE_RIGHT_DEG = float(os.getenv("ROTATE_RIGHT_DEG", "80.0"))
+ROTATE_LEFT_DEG = float(os.getenv("ROTATE_LEFT_DEG", "170.0"))
+
+# Angular movement detection thresholds
+ANGULAR_STUCK_THRESHOLD = float(os.getenv("ANGULAR_STUCK_THRESHOLD", "0.15"))
+ANGULAR_MIN_DEG_PER_TICK = float(os.getenv("ANGULAR_MIN_DEG_PER_TICK", "5.0"))
 
 
 # ==============================================================================

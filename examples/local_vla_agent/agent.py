@@ -18,11 +18,12 @@ try:
         DEADBAND_LINEAR, DEADBAND_ANGULAR,
         CAPTURE_HISTORY, CAPTURE_AGREEMENT, CAPTURE_SIMILARITY_THRESHOLD,
         STALE_RETRY, STALE_RETRY_DELAY, STALE_BACKOFF_MAX_SLEEP,
-        LLM_HISTORY_LEN
+        LLM_HISTORY_LEN,
+        ROTATE_RIGHT_DEG, ROTATE_LEFT_DEG, ANGULAR_STUCK_THRESHOLD, ANGULAR_MIN_DEG_PER_TICK
     )
     from utils import (
         extract_first_json_object, is_timestamp_stale,
-        stable_caption_from_history, smooth_action
+        stable_caption_from_history, smooth_action, orientation_delta
     )
     from schema import Action
     from safety import validate_action, safety_override
@@ -43,11 +44,12 @@ except ImportError:
         DEADBAND_LINEAR, DEADBAND_ANGULAR,
         CAPTURE_HISTORY, CAPTURE_AGREEMENT, CAPTURE_SIMILARITY_THRESHOLD,
         STALE_RETRY, STALE_RETRY_DELAY, STALE_BACKOFF_MAX_SLEEP,
-        LLM_HISTORY_LEN
+        LLM_HISTORY_LEN,
+        ROTATE_RIGHT_DEG, ROTATE_LEFT_DEG, ANGULAR_STUCK_THRESHOLD, ANGULAR_MIN_DEG_PER_TICK
     )
     from .utils import (
         extract_first_json_object, is_timestamp_stale,
-        stable_caption_from_history, smooth_action
+        stable_caption_from_history, smooth_action, orientation_delta
     )
     from .schema import Action
     from .safety import validate_action, safety_override
@@ -97,15 +99,19 @@ class StuckRecoveryManager:
         self.state_ticks = 0
         self.stuck_counter = 0
         self.gave_up = False
+        # Track orientation for rotation confirmation
+        self.prev_orientation = None  # Last observed orientation value
+        self.cum_rot_deg = 0.0        # Cumulative absolute rotation (degrees) during a rotation state
     
-    def update(self, is_stuck: bool, depth_front: str) -> Optional[Action]:
+    def update(self, is_stuck: bool, depth_front: str, orientation: Optional[float]) -> Optional[Action]:
         """
-        Update the recovery state machine.
-        
+        Update the recovery state machine with orientation-aware rotation checks.
+
         Args:
             is_stuck: True if rover is currently stuck (commanding move but not moving)
             depth_front: Depth analysis string from front camera
-            
+            orientation: Current orientation telemetry value (raw)
+
         Returns:
             Action to execute, or None if normal operation should continue
         """
@@ -115,35 +121,52 @@ class StuckRecoveryManager:
         elif not is_stuck and self.state == StuckRecoveryState.NORMAL:
             self.stuck_counter = 0
             self.gave_up = False
-        
+
         # Start recovery sequence if stuck for too long
         if self.stuck_counter >= self.STUCK_THRESHOLD and self.state == StuckRecoveryState.NORMAL:
             logger.warning(f"Stuck detected (counter={self.stuck_counter}). Starting recovery sequence.")
             self.state = StuckRecoveryState.BACKING_UP
             self.state_ticks = 0
             self.stuck_counter = 0
-        
+            # Reset orientation tracking
+            self.prev_orientation = orientation
+            self.cum_rot_deg = 0.0
+
         # Process current state
         if self.state == StuckRecoveryState.NORMAL:
+            # keep orientation memory up to date
+            self.prev_orientation = orientation
             return None  # Normal operation
-        
+
+        # Update orientation-based rotation accounting
+        if orientation is not None and self.prev_orientation is not None:
+            d = abs(orientation_delta(self.prev_orientation, orientation))
+            if d > 0.0:
+                self.cum_rot_deg += d
+            logger.debug(f"Orientation delta: {d:.2f} deg (cum={self.cum_rot_deg:.2f})")
+        # keep prev updated for next tick
+        self.prev_orientation = orientation
+
         self.state_ticks += 1
-        
+
         if self.state == StuckRecoveryState.BACKING_UP:
             if self.state_ticks >= self.BACKUP_TICKS:
-                logger.info("Backup complete. Rotating 90° right...")
+                logger.info("Backup complete. Rotating right (orientation-aware)...")
                 self.state = StuckRecoveryState.ROTATE_RIGHT
                 self.state_ticks = 0
+                self.cum_rot_deg = 0.0
             return Action(linear=-0.3, angular=0.0, lamp=1)
-        
+
         elif self.state == StuckRecoveryState.ROTATE_RIGHT:
-            if self.state_ticks >= self.ROTATE_TICKS:
-                logger.info("Right rotation complete. Checking path...")
+            # If we've rotated enough based on orientation, finish early
+            if self.cum_rot_deg >= ROTATE_RIGHT_DEG or self.state_ticks >= self.ROTATE_TICKS:
+                logger.info("Right rotation complete (confirmed). Checking path...")
                 self.state = StuckRecoveryState.CHECK_RIGHT
                 self.state_ticks = 0
+                self.cum_rot_deg = 0.0
             # Negative angular = turn right
-            return Action(linear=0.0, angular=-0.7, lamp=1)
-        
+            return Action(linear=0.0, angular=-0.6, lamp=1)
+
         elif self.state == StuckRecoveryState.CHECK_RIGHT:
             if self.state_ticks >= self.CHECK_TICKS:
                 # Check if path is clear based on depth
@@ -151,29 +174,33 @@ class StuckRecoveryManager:
                     logger.info("Path clear after right turn! Resuming normal operation.")
                     self.state = StuckRecoveryState.NORMAL
                     self.state_ticks = 0
+                    self.cum_rot_deg = 0.0
                     return None
                 else:
-                    logger.info("Path still blocked. Rotating 180° left...")
+                    logger.info("Path still blocked. Rotating left (longer rotation)...")
                     self.state = StuckRecoveryState.ROTATE_LEFT
                     self.state_ticks = 0
+                    self.cum_rot_deg = 0.0
             # Small forward creep while checking
             return Action(linear=0.1, angular=0.0, lamp=1)
-        
+
         elif self.state == StuckRecoveryState.ROTATE_LEFT:
-            # 180° left = ~twice the rotation time
-            if self.state_ticks >= self.ROTATE_TICKS * 2:
-                logger.info("Left rotation complete. Checking path...")
+            # If we've rotated enough (approx 180 deg) or timed out, finish
+            if self.cum_rot_deg >= ROTATE_LEFT_DEG or self.state_ticks >= self.ROTATE_TICKS * 2:
+                logger.info("Left rotation complete (confirmed). Checking path...")
                 self.state = StuckRecoveryState.CHECK_LEFT
                 self.state_ticks = 0
+                self.cum_rot_deg = 0.0
             # Positive angular = turn left
-            return Action(linear=0.0, angular=0.7, lamp=1)
-        
+            return Action(linear=0.0, angular=0.6, lamp=1)
+
         elif self.state == StuckRecoveryState.CHECK_LEFT:
             if self.state_ticks >= self.CHECK_TICKS:
                 if self._is_path_clear(depth_front):
                     logger.info("Path clear after left turn! Resuming normal operation.")
                     self.state = StuckRecoveryState.NORMAL
                     self.state_ticks = 0
+                    self.cum_rot_deg = 0.0
                     return None
                 else:
                     logger.warning("All paths blocked. Giving up - need manual intervention.")
@@ -181,15 +208,16 @@ class StuckRecoveryManager:
                     self.state_ticks = 0
                     self.gave_up = True
             return Action(linear=0.1, angular=0.0, lamp=1)
-        
+
         elif self.state == StuckRecoveryState.GIVING_UP:
             # Stay stopped until something changes
             if self.state_ticks > 20:  # After 10 seconds, try again
                 logger.info("Retry timeout reached. Attempting recovery again...")
                 self.state = StuckRecoveryState.BACKING_UP
                 self.state_ticks = 0
+                self.cum_rot_deg = 0.0
             return Action(linear=0.0, angular=0.0, lamp=1)
-        
+
         return None
     
     def _is_path_clear(self, depth_front: str) -> bool:
@@ -230,6 +258,7 @@ async def main():
     # HTTP client setup
     timeout = aiohttp.ClientTimeout(total=HTTP_TIMEOUT_S)
     last_action = Action(0.0, 0.0, 0)
+    last_orientation = None
 
     # Tracking variables
     danger_streak = 0
@@ -347,14 +376,29 @@ async def main():
             logger.info(f"Rear: '{cap_rear}' | Depth: {depth_rear}")
 
             # ------------------------------------------------------------------
-            # STEP 4: Check for stuck recovery override
+            # STEP 4: Check for stuck recovery override (linear OR angular failures)
             # ------------------------------------------------------------------
             current_speed = float(telemetry.get("speed") or 0.0)
+            current_orientation = telemetry.get("orientation")
+
+            # Linear movement check
             is_trying_to_move = abs(last_action.linear) > 0.15
             is_actually_moving = abs(current_speed) >= 0.04
-            is_stuck = is_trying_to_move and not is_actually_moving
+            linear_stuck = is_trying_to_move and not is_actually_moving
 
-            recovery_action = stuck_recovery.update(is_stuck, depth_front)
+            # Angular movement check (if we commanded a rotation but orientation didn't change)
+            rotation_expected = abs(last_action.angular) > ANGULAR_STUCK_THRESHOLD
+            orientation_changed = False
+            if rotation_expected and last_orientation is not None and current_orientation is not None:
+                delta_deg = abs(orientation_delta(last_orientation, current_orientation))
+                orientation_changed = delta_deg >= ANGULAR_MIN_DEG_PER_TICK
+                logger.debug(f"Rotation check: delta_deg={delta_deg:.2f}, changed={orientation_changed}")
+
+            angular_stuck = rotation_expected and not orientation_changed
+
+            is_stuck = linear_stuck or angular_stuck
+
+            recovery_action = stuck_recovery.update(is_stuck, depth_front, current_orientation)
             
             if recovery_action is not None:
                 # Override with recovery action

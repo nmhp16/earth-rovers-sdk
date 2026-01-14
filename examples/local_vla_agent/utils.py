@@ -100,6 +100,57 @@ def is_timestamp_stale(ts: Any, now: float, stale_s: float) -> bool:
 
 
 # ==============================================================================
+# ORIENTATION HELPERS
+# ==============================================================================
+
+def _normalize_angle_deg(angle: float) -> float:
+    """Normalize angle to [-180, 180] degrees."""
+    a = (angle + 180.0) % 360.0 - 180.0
+    return a
+
+
+def _raw_to_degrees(raw: float, scale: int) -> float:
+    """Map a raw orientation value to degrees assuming given max scale.
+
+    scale: e.g., 360 (already degrees) or 256 (raw 0-255 mapping)
+    """
+    if scale == 360:
+        return float(raw)
+    # map from 0..(scale-1) to 0..360 deg
+    return float(raw) / float(scale - 1) * 360.0
+
+
+def orientation_delta(a: Any, b: Any) -> float:
+    """
+    Compute the signed minimal angular delta from a -> b in degrees in range [-180, 180].
+
+    The telemetry 'orientation' may be reported in different scales (e.g. 0..255 or 0..360).
+    This helper tries both common interpretations and returns the smallest-magnitude delta in degrees.
+    Returns 0.0 if either value is missing or invalid.
+    """
+    try:
+        a_raw = float(a)
+        b_raw = float(b)
+    except Exception:
+        return 0.0
+
+    # Try interpreting as degrees directly (0..360)
+    a_deg_360 = _raw_to_degrees(a_raw, 360)
+    b_deg_360 = _raw_to_degrees(b_raw, 360)
+    delta_360 = _normalize_angle_deg(b_deg_360 - a_deg_360)
+
+    # Try interpreting as 0..255 raw mapping
+    a_deg_256 = _raw_to_degrees(a_raw, 256)
+    b_deg_256 = _raw_to_degrees(b_raw, 256)
+    delta_256 = _normalize_angle_deg(b_deg_256 - a_deg_256)
+
+    # Choose the interpretation with smaller absolute delta
+    if abs(delta_360) <= abs(delta_256):
+        return delta_360
+    return delta_256
+
+
+# ==============================================================================
 # FILE DOWNLOAD
 # ==============================================================================
 

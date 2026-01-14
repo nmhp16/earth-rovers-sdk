@@ -89,9 +89,6 @@ class BrowserService:
                 await self.page.evaluate(call)
                 self._video_init_done = True
             except Exception as e:
-                # Timeout or other error waiting for players; log and continue
-                logger.exception("Player container wait timed out or failed: %s", e)
-                # Keep _video_init_done False so we can retry later, but don't raise
                 return
 
     async def take_screenshot(self, video_output_folder: str, elements: list):
