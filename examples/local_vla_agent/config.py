@@ -72,26 +72,20 @@ PROXIMITY_KEYWORDS = {
 # ==============================================================================
 # VISION MODEL CONFIGURATION
 # ==============================================================================
-# Vision-Language Model for image captioning
-# Recommended: "microsoft/git-large-coco" (works reliably with transformers 5.x)
-# Note: Florence-2 and Moondream2 have compatibility issues with transformers 5.x
-VLM_MODEL_NAME = os.getenv("VLM_MODEL_NAME", "microsoft/git-large-coco")
+VLM_MODEL_NAME = os.getenv("VLM_MODEL_NAME", "HuggingFaceTB/SmolVLM-256M-Instruct")
 VLM_MAX_NEW_TOKENS = int(os.getenv("VLM_MAX_NEW_TOKENS", "100"))
 
-# Depth estimation model for obstacle detection
-DEPTH_MODEL_NAME = os.getenv("DEPTH_MODEL_NAME", "LiheYoung/depth-anything-small-hf")
-
+DEPTH_MODEL_NAME = os.getenv("DEPTH_MODEL_NAME", "depth-anything/Depth-Anything-V2-Small-hf")
 
 # ==============================================================================
 # LLM (DECISION BRAIN) CONFIGURATION
 # ==============================================================================
-# Path to the GGUF quantized LLM model
-MODEL_PATH = os.getenv("MODEL_PATH", "./models/stablelm-zephyr-3b.Q4_K_M.gguf")
+MODEL_PATH = os.getenv("MODEL_PATH", "./models/Phi-3.5-mini-instruct-Q4_K_M.gguf")
 
 # Download URL if model not found locally
 MODEL_DOWNLOAD_URL = os.getenv(
     "MODEL_DOWNLOAD_URL",
-    "https://huggingface.co/TheBloke/stablelm-zephyr-3b-GGUF/resolve/main/stablelm-zephyr-3b.Q4_K_M.gguf",
+    "https://huggingface.co/bartowski/Phi-3.5-mini-instruct-GGUF/resolve/main/Phi-3.5-mini-instruct-Q4_K_M.gguf",
 )
 
 # LLM inference parameters

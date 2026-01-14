@@ -10,11 +10,8 @@ try:
 except ImportError:
     from .config import logger, VLM_MODEL_NAME, VLM_MAX_NEW_TOKENS, DEPTH_MODEL_NAME
 
-
-# Default to GIT model which works reliably with transformers 5.x
-# Florence-2 and Moondream2 have compatibility issues
 DEFAULT_VLM_MODEL = "microsoft/git-large-coco"
-
+SMOLVLM_MODELS = ["smolvlm", "smol"]
 
 class VisionSystem: 
     def __init__(self):
@@ -56,8 +53,12 @@ class VisionSystem:
             return "cpu", torch.float32
     
     def _load_vision_model(self):
-        """Load the main vision-language model (GIT or BLIP fallback)."""
-        if "git" in self.model_name.lower():
+        """Load the main vision-language model (SmolVLM, GIT, or BLIP fallback)."""
+        model_lower = self.model_name.lower()
+        
+        if any(s in model_lower for s in SMOLVLM_MODELS):
+            self._load_smolvlm()
+        elif "git" in model_lower:
             self._load_git()
         else:
             self._load_blip_fallback()
@@ -82,10 +83,39 @@ class VisionSystem:
             self.model.to(self.device)
             self.model.eval()
             self.is_git = True
+            self.is_smolvlm = False
             logger.info(f"GIT loaded on {self.device} with {self.dtype}")
         except Exception as e:
             logger.error(f"Failed to load GIT: {e}")
             self._load_blip_fallback()
+    
+    def _load_smolvlm(self):
+        """
+        Load SmolVLM for image captioning.
+        
+        SmolVLM is a modern 450M param model optimized for edge devices,
+        ideal for Mac with Apple Silicon.
+        """
+        from transformers import AutoProcessor, AutoModelForVision2Seq
+        
+        logger.info(f"Loading SmolVLM from {self.model_name}...")
+        
+        try:
+            self.processor = AutoProcessor.from_pretrained(self.model_name)
+            self.model = AutoModelForVision2Seq.from_pretrained(
+                self.model_name,
+                torch_dtype=self.dtype,
+                _attn_implementation="eager"  # For MPS compatibility
+            )
+            self.model.to(self.device)
+            self.model.eval()
+            self.is_git = False
+            self.is_smolvlm = True
+            logger.info(f"SmolVLM loaded on {self.device} with {self.dtype}")
+        except Exception as e:
+            logger.warning(f"Failed to load SmolVLM: {e}. Falling back to GIT.")
+            self.model_name = DEFAULT_VLM_MODEL
+            self._load_git()
     
     def _load_blip_fallback(self):
         """
@@ -108,6 +138,7 @@ class VisionSystem:
             self.model.to(self.device)
             self.model.eval()
             self.is_git = False
+            self.is_smolvlm = False
             logger.info(f"BLIP loaded on {self.device} with {self.dtype}")
         except Exception as e:
             logger.error(f"Failed to load BLIP: {e}")
@@ -152,7 +183,9 @@ class VisionSystem:
             img = img.resize((384, 384))  # Resize for speed
             
             # Generate caption based on model type
-            if self.is_git:
+            if getattr(self, 'is_smolvlm', False):
+                cap = self._caption_smolvlm(img)
+            elif self.is_git:
                 cap = self._caption_git(img)
             else:
                 cap = self._caption_blip(img)
@@ -163,6 +196,31 @@ class VisionSystem:
         except Exception as e:
             logger.error(f"Vision error: {e}")
             return "camera malfunction"
+    
+    def _caption_smolvlm(self, img: Image.Image) -> str:
+        """Generate caption using SmolVLM model."""
+        messages = [
+            {
+                "role": "user",
+                "content": [
+                    {"type": "image"},
+                    {"type": "text", "text": "Describe this scene briefly for robot navigation. Focus on obstacles, paths, and terrain."}
+                ]
+            }
+        ]
+        prompt = self.processor.apply_chat_template(messages, add_generation_prompt=True)
+        inputs = self.processor(text=prompt, images=[img], return_tensors="pt").to(self.device)
+        
+        with torch.no_grad():
+            out = self.model.generate(
+                **inputs,
+                max_new_tokens=VLM_MAX_NEW_TOKENS,
+                do_sample=False
+            )
+        
+        # Decode only the generated tokens (skip prompt)
+        generated = out[0][inputs['input_ids'].shape[1]:]
+        return self.processor.decode(generated, skip_special_tokens=True).strip()
     
     def _caption_git(self, img: Image.Image) -> str:
         """Generate caption using GIT model."""
@@ -246,27 +304,40 @@ class VisionSystem:
             
             # Analyze regions (center, left, right thirds)
             h, w = depth_normalized.shape
+            
+            # Ground region (bottom third, center)
+            ground_region = depth_normalized[2*h//3:, w//3:2*w//3]
+            # Center/ahead region (middle third)
             center_region = depth_normalized[h//3:2*h//3, w//3:2*w//3]
+            # Sky/far region (top third)
+            sky_region = depth_normalized[:h//3, w//3:2*w//3]
+            # Left and right
             left_region = depth_normalized[h//3:2*h//3, :w//3]
             right_region = depth_normalized[h//3:2*h//3, 2*w//3:]
             
+            ground_depth = ground_region.mean()
             center_depth = center_region.mean()
+            sky_depth = sky_region.mean()
             left_depth = left_region.mean()
             right_depth = right_region.mean()
             
-            # Lower depth value = closer object
+            # FIXED: Higher depth value = closer object in normalized output
             # Threshold for "close" obstacle (normalized 0-1)
-            CLOSE_THRESHOLD = 0.3
+            CLOSE_THRESHOLD = 0.7
             
             obstacles = []
-            if center_depth < CLOSE_THRESHOLD:
+            if center_depth > CLOSE_THRESHOLD:
                 obstacles.append("obstacle ahead")
-            if left_depth < CLOSE_THRESHOLD:
+            if left_depth > CLOSE_THRESHOLD:
                 obstacles.append("obstacle left")
-            if right_depth < CLOSE_THRESHOLD:
+            if right_depth > CLOSE_THRESHOLD:
                 obstacles.append("obstacle right")
             
-            return ", ".join(obstacles) if obstacles else "path clear"
+            # Return quantitative values for LLM decision making
+            depth_str = f"Close(ground)={ground_depth:.2f}, Mid(ahead)={center_depth:.2f}, Far(sky)={sky_depth:.2f}"
+            obstacle_str = ", ".join(obstacles) if obstacles else "path clear"
+            
+            return f"{depth_str} | {obstacle_str}"
             
         except Exception as e:
             logger.error(f"Depth analysis error: {e}")
