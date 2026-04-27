@@ -11,23 +11,10 @@ except ImportError:
 
 
 def validate_action(obj: Dict[str, Any]) -> Action:
-    """
-    Validate and sanitize an action dictionary from LLM output.
-    
-    Args:
-        obj: Dictionary with 'linear', 'angular', 'lamp' keys
-        
-    Returns:
-        Validated Action with clamped values
-    """
-    linear = clamp(safe_float(obj.get("linear", 0.0), 0.0), -1.0, 1.0)
-    angular = clamp(safe_float(obj.get("angular", 0.0), 0.0), -1.0, 1.0)
+    """Validate and sanitize an action dictionary from LLM output."""
+    linear = clamp(safe_float(obj.get("linear", 0.0), 0.0), -MAX_LINEAR, MAX_LINEAR)
+    angular = clamp(safe_float(obj.get("angular", 0.0), 0.0), -MAX_ANGULAR, MAX_ANGULAR)
     lamp = 1 if safe_int(obj.get("lamp", 0), 0) == 1 else 0
-
-    # Apply conservative caps
-    linear = clamp(linear, -MAX_LINEAR, MAX_LINEAR)
-    angular = clamp(angular, -MAX_ANGULAR, MAX_ANGULAR)
-
     return Action(linear=linear, angular=angular, lamp=lamp)
 
 

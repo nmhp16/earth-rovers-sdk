@@ -1,4 +1,5 @@
 import json
+import math
 import os
 import logging
 from collections import Counter
@@ -150,6 +151,116 @@ def orientation_delta(a: Any, b: Any) -> float:
     return delta_256
 
 
+def normalize_orientation_to_deg(raw: Any) -> Optional[float]:
+    """Normalize a raw orientation telemetry value to degrees in [0, 360).
+
+    Uses the same dual-interpretation logic as orientation_delta — picks
+    whichever scale (0..360 or 0..255) yields a value in range. Returns
+    None if the value is missing/invalid.
+    """
+    if raw is None:
+        return None
+    try:
+        v = float(raw)
+    except Exception:
+        return None
+    if 0 <= v <= 360:
+        return v % 360.0
+    if 0 <= v <= 255:
+        return (v / 255.0 * 360.0) % 360.0
+    # Unknown scale — best-effort modulo
+    return v % 360.0
+
+
+# ==============================================================================
+# GEOMETRY: pixel coords -> bearing / distance, GPS math
+# ==============================================================================
+
+def pixel_to_bearing_deg(pixel_x: float, image_width: int, hfov_deg: float) -> float:
+    """Map a pixel x-coordinate to a bearing in degrees relative to camera center.
+
+    Returns positive for LEFT of center (matches the rover's angular convention
+    where positive angular = turn left). bearing = 0 means dead ahead.
+    """
+    if image_width <= 0:
+        return 0.0
+    # Center the pixel: -1 (right edge) .. +1 (left edge)  — note: image x grows
+    # rightward, but we want positive=left, so we flip sign.
+    centered = (image_width / 2.0 - pixel_x) / (image_width / 2.0)
+    return centered * (hfov_deg / 2.0)
+
+
+def pixel_to_pitch_deg(pixel_y: float, image_height: int, vfov_deg: float,
+                       camera_pitch_deg: float = 0.0) -> float:
+    """Map a pixel y-coordinate to a pitch in degrees relative to horizon.
+
+    Positive pitch = below horizon (toward the ground); negative = above.
+    Includes the camera's static down-tilt (camera_pitch_deg).
+    """
+    if image_height <= 0:
+        return camera_pitch_deg
+    # 0 (top) -> -vfov/2, height (bottom) -> +vfov/2
+    centered = (pixel_y - image_height / 2.0) / (image_height / 2.0)
+    return centered * (vfov_deg / 2.0) + camera_pitch_deg
+
+
+def ground_distance_from_pixel_y(
+    pixel_y: float,
+    image_height: int,
+    vfov_deg: float,
+    camera_height_m: float,
+    camera_pitch_deg: float = 0.0,
+    max_distance_m: float = 50.0,
+) -> Optional[float]:
+    """Compute horizontal distance to the ground intersection of a ray
+    cast through pixel (_, pixel_y), assuming a flat ground plane.
+
+    Useful as a fallback distance estimator when no metric depth is available.
+    Returns None for rays that point at or above the horizon.
+    """
+    pitch = pixel_to_pitch_deg(pixel_y, image_height, vfov_deg, camera_pitch_deg)
+    # Need positive (downward) pitch for a ground intersection
+    if pitch <= 0.5:
+        return None
+    distance = camera_height_m / math.tan(math.radians(pitch))
+    if distance <= 0 or distance > max_distance_m:
+        return None
+    return distance
+
+
+def haversine_m(lat1: float, lon1: float, lat2: float, lon2: float) -> float:
+    """Great-circle distance in meters between two GPS points."""
+    R = 6371000.0  # earth radius in meters
+    p1, p2 = math.radians(lat1), math.radians(lat2)
+    dlat = math.radians(lat2 - lat1)
+    dlon = math.radians(lon2 - lon1)
+    a = math.sin(dlat / 2) ** 2 + math.cos(p1) * math.cos(p2) * math.sin(dlon / 2) ** 2
+    return 2 * R * math.asin(math.sqrt(a))
+
+
+def bearing_deg(lat1: float, lon1: float, lat2: float, lon2: float) -> float:
+    """Initial bearing from point 1 to point 2 in degrees [0, 360),
+    where 0 = North, 90 = East."""
+    p1 = math.radians(lat1)
+    p2 = math.radians(lat2)
+    dlon = math.radians(lon2 - lon1)
+    x = math.sin(dlon) * math.cos(p2)
+    y = math.cos(p1) * math.sin(p2) - math.sin(p1) * math.cos(p2) * math.cos(dlon)
+    return (math.degrees(math.atan2(x, y)) + 360.0) % 360.0
+
+
+def relative_bearing_deg(target_bearing_deg: float, heading_deg: float) -> float:
+    """Bearing relative to current heading, normalized to (-180, 180].
+
+    Sign convention: positive = need to turn LEFT to face target (matches the
+    rover's angular convention).
+    """
+    rel = (target_bearing_deg - heading_deg + 540.0) % 360.0 - 180.0
+    # World bearing is clockwise (0=N, 90=E). Rover convention: +angular = left
+    # = counter-clockwise. Flip the sign so the brain prompt matches.
+    return -rel
+
+
 # ==============================================================================
 # FILE DOWNLOAD
 # ==============================================================================
@@ -271,43 +382,43 @@ def smooth_action(
     deadband_linear: float,
     deadband_angular: float,
     max_linear: float,
-    max_angular: float
+    max_angular: float,
+    recovery_alpha: Optional[float] = None,
+    recovery_max_delta_linear_per_sec: Optional[float] = None,
+    recovery_max_delta_angular_per_sec: Optional[float] = None,
+    is_recovery: bool = False,
 ) -> Tuple[float, float]:
     """
     Apply smoothing and rate-limiting to motor commands.
-    
+
     Processing steps:
     1. Exponential smoothing: s = alpha * new + (1-alpha) * last
     2. Deadband: ignore changes smaller than threshold
     3. Rate limiting: clamp change per tick based on max delta/sec
     4. Final clamp to absolute limits
-    
-    Args:
-        new_linear: Target linear velocity
-        new_angular: Target angular velocity
-        last_linear: Previous linear velocity
-        last_angular: Previous angular velocity
-        alpha: Smoothing factor (higher = more responsive)
-        max_delta_linear_per_sec: Maximum linear change rate
-        max_delta_angular_per_sec: Maximum angular change rate
-        dt: Time step in seconds
-        deadband_linear: Minimum linear change to apply
-        deadband_angular: Minimum angular change to apply
-        max_linear: Maximum absolute linear velocity
-        max_angular: Maximum absolute angular velocity
-        
-    Returns:
-        Tuple of (smoothed_linear, smoothed_angular)
+
+    Recovery mode raises both alpha (more responsive) and rate caps so the
+    BACKING_UP / ROTATE_* states can engage promptly instead of being throttled.
     """
+    # Apply recovery overrides
+    if is_recovery:
+        if recovery_alpha is not None:
+            alpha = recovery_alpha
+        if recovery_max_delta_linear_per_sec is not None:
+            max_delta_linear_per_sec = recovery_max_delta_linear_per_sec
+        if recovery_max_delta_angular_per_sec is not None:
+            max_delta_angular_per_sec = recovery_max_delta_angular_per_sec
+
     # 1. Exponential smoothing
     s_lin = alpha * float(new_linear) + (1.0 - alpha) * float(last_linear)
     s_ang = alpha * float(new_angular) + (1.0 - alpha) * float(last_angular)
 
-    # 2. Deadband - ignore tiny changes
-    if abs(s_lin - last_linear) < deadband_linear:
-        s_lin = last_linear
-    if abs(s_ang - last_angular) < deadband_angular:
-        s_ang = last_angular
+    # 2. Deadband - ignore tiny changes (skip during recovery so small commands still apply)
+    if not is_recovery:
+        if abs(s_lin - last_linear) < deadband_linear:
+            s_lin = last_linear
+        if abs(s_ang - last_angular) < deadband_angular:
+            s_ang = last_angular
 
     # 3. Rate limiting - clamp per-tick delta
     max_d_lin = max_delta_linear_per_sec * dt
